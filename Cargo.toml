@@ -59,7 +59,7 @@ codec = { path = "crates/codec" }
 input = { path = "crates/input" }
 
 [profile.release]
-opt-level = "z"
+opt-level = 2
 lto = true
 codegen-units = 1
 panic = "abort"

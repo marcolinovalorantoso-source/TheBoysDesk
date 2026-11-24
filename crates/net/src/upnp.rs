@@ -20,14 +20,24 @@ pub async fn try_map_udp_port(local_port: u16) -> Result<UpnpMapping, NetError> 
     let lan_ip = local_lan_ipv4()
         .ok_or_else(|| NetError::Upnp("unable to determine local LAN IPv4".into()))?;
 
-    let opts = SearchOptions {
-        timeout: Some(Duration::from_secs(3)),
+    let bound_opts = SearchOptions {
+        bind_addr: SocketAddr::V4(SocketAddrV4::new(lan_ip, 0)),
+        timeout: Some(Duration::from_secs(5)),
         ..Default::default()
     };
 
-    let gateway = search_gateway(opts)
-        .await
-        .map_err(|e| NetError::Upnp(e.to_string()))?;
+    let gateway = match search_gateway(bound_opts).await {
+        Ok(gw) => gw,
+        Err(_) => {
+            let fallback_opts = SearchOptions {
+                timeout: Some(Duration::from_secs(3)),
+                ..Default::default()
+            };
+            search_gateway(fallback_opts)
+                .await
+                .map_err(|e| NetError::Upnp(e.to_string()))?
+        }
+    };
 
     let local_addr = SocketAddr::V4(SocketAddrV4::new(lan_ip, local_port));
     gateway
