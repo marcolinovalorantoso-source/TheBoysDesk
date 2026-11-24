@@ -1,6 +1,7 @@
 //! Main desktop application (Host + Client) built with `egui` (`eframe` + `glow`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod i18n;
 mod key_map;
 mod session;
 
@@ -17,6 +18,7 @@ use net::{local_lan_ipv4, stun, upnp, P2pEndpoint};
 use protocol::{ControlMessage, InputEvent, MouseButton};
 use tokio::sync::RwLock;
 
+use crate::i18n::Lang;
 use crate::key_map::egui_key_to_scancode;
 use crate::session::{
     connect_client_session, run_host_listener, ClientSessionHandle, HostRuntimeState,
@@ -47,7 +49,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 700.0])
         .with_min_inner_size([860.0, 560.0])
-        .with_title("TheBoysDesk — Controllo Remoto P2P");
+        .with_title(Lang::default().window_title());
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -165,9 +167,9 @@ struct RemoteDesktopApp {
     local_pin: String,
 
     lan_addr_str: Arc<Mutex<String>>,
-    public_addr_str: Arc<Mutex<String>>,
+    /// `None` = checking, `Some(None)` = failed, `Some(Some(addr))` = resolved.
+    public_addr_state: Arc<Mutex<Option<Option<String>>>>,
     upnp_ok: Arc<Mutex<Option<bool>>>,
-    upnp_note: Arc<Mutex<String>>,
     lan_peers: Option<Arc<RwLock<HashMap<String, DiscoveredPeer>>>>,
 
     // Client connect form
@@ -179,7 +181,8 @@ struct RemoteDesktopApp {
     connect_task: Option<tokio::task::JoinHandle<()>>,
     client_session: Arc<Mutex<Option<ClientSessionHandle>>>,
 
-    // Copy feedback & modals
+    // UI language, copy feedback & modals
+    lang: Lang,
     copied_hint: Option<(&'static str, Instant)>,
     session_notice: Option<String>,
     show_info_modal: bool,
@@ -210,9 +213,8 @@ impl RemoteDesktopApp {
             .unwrap_or_else(|| format!("127.0.0.1:{quic_port}"));
 
         let lan_addr_str = Arc::new(Mutex::new(lan_ip));
-        let public_addr_str = Arc::new(Mutex::new("Rilevamento...".into()));
+        let public_addr_state = Arc::new(Mutex::new(None));
         let upnp_ok = Arc::new(Mutex::new(None));
-        let upnp_note = Arc::new(Mutex::new("Verifica UPnP sul router...".into()));
 
         let host_cert_sha256 = cert_fingerprint_sha256(identity.cert_der.as_ref());
         let host_state = Arc::new(HostRuntimeState::new(initial_pin.clone()));
@@ -234,28 +236,25 @@ impl RemoteDesktopApp {
             ))
             .ok();
 
-        let pub_clone = public_addr_str.clone();
+        let pub_clone = public_addr_state.clone();
         let upnp_ok_clone = upnp_ok.clone();
-        let upnp_note_clone = upnp_note.clone();
         let ctx_net = cc.egui_ctx.clone();
         rt.spawn(async move {
             match upnp::try_map_udp_port(quic_port).await {
                 Ok(m) => {
                     *upnp_ok_clone.lock().unwrap() = Some(true);
-                    *upnp_note_clone.lock().unwrap() =
-                        format!("UPnP attivo (porta {}/UDP aperta)", m.external_port);
-                    *pub_clone.lock().unwrap() = format!("{}:{}", m.external_ip, m.external_port);
+                    *pub_clone.lock().unwrap() =
+                        Some(Some(format!("{}:{}", m.external_ip, m.external_port)));
                 }
                 Err(_) => {
                     *upnp_ok_clone.lock().unwrap() = Some(false);
-                    *upnp_note_clone.lock().unwrap() =
-                        format!("UPnP disattivo: apri porta {quic_port}/UDP sul router per Internet");
                     match stun::discover_public_addr().await {
                         Ok(addr) => {
-                            *pub_clone.lock().unwrap() = format!("{}:{quic_port}", addr.ip());
+                            *pub_clone.lock().unwrap() =
+                                Some(Some(format!("{}:{quic_port}", addr.ip())));
                         }
                         Err(_) => {
-                            *pub_clone.lock().unwrap() = "Non rilevato".into();
+                            *pub_clone.lock().unwrap() = Some(None);
                         }
                     }
                 }
@@ -271,9 +270,8 @@ impl RemoteDesktopApp {
             host_state,
             local_pin: initial_pin,
             lan_addr_str,
-            public_addr_str,
+            public_addr_state,
             upnp_ok,
-            upnp_note,
             lan_peers,
             target_addr_input: String::new(),
             target_pin_input: String::new(),
@@ -282,6 +280,7 @@ impl RemoteDesktopApp {
             connecting: Arc::new(Mutex::new(false)),
             connect_task: None,
             client_session: Arc::new(Mutex::new(None)),
+            lang: Lang::default(),
             copied_hint: None,
             session_notice: None,
             show_info_modal: false,
@@ -305,20 +304,32 @@ impl RemoteDesktopApp {
     }
 
     fn start_connect(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
         let addr_str = self.target_addr_input.trim().to_string();
         let pin = self.target_pin_input.trim().to_string();
         let Ok(addr) = addr_str.parse::<SocketAddr>() else {
-            *self.connect_error.lock().unwrap() =
-                Some("Formato non valido. Usa IP:Porta (es. 192.168.1.50:21116)".into());
+            *self.connect_error.lock().unwrap() = Some(
+                lang.pick(
+                    "Invalid format. Use IP:Port (e.g. 192.168.1.50:21116)",
+                    "Formato non valido. Usa IP:Porta (es. 192.168.1.50:21116)",
+                )
+                .into(),
+            );
             return;
         };
         if pin.is_empty() {
-            *self.connect_error.lock().unwrap() = Some("Inserisci il PIN di sessione".into());
+            *self.connect_error.lock().unwrap() = Some(
+                lang.pick("Please enter the session PIN", "Inserisci il PIN di sessione")
+                    .into(),
+            );
             return;
         }
 
         *self.connect_error.lock().unwrap() = None;
-        *self.connect_progress.lock().unwrap() = Some("Avvio connessione...".into());
+        *self.connect_progress.lock().unwrap() = Some(
+            lang.pick("Starting connection...", "Avvio connessione...")
+                .into(),
+        );
         *self.connecting.lock().unwrap() = true;
 
         let ep = self.endpoint.clone();
@@ -337,6 +348,7 @@ impl RemoteDesktopApp {
                 pin,
                 local_name,
                 local_id,
+                lang,
                 ctx_c.clone(),
                 prog_slot.clone(),
             )
@@ -346,7 +358,10 @@ impl RemoteDesktopApp {
                     *session_slot.lock().unwrap() = Some(handle);
                 }
                 Err(e) => {
-                    *err_slot.lock().unwrap() = Some(format!("Connessione fallita: {e}"));
+                    *err_slot.lock().unwrap() = Some(match lang {
+                        Lang::En => format!("Connection failed: {e}"),
+                        Lang::It => format!("Connessione fallita: {e}"),
+                    });
                 }
             }
             *prog_slot.lock().unwrap() = None;
@@ -359,6 +374,8 @@ impl RemoteDesktopApp {
 
 impl eframe::App for RemoteDesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let lang = self.lang;
+
         // 1. Incoming connection consent modal
         let mut consent_decision: Option<bool> = None;
         let consent_info = {
@@ -369,7 +386,7 @@ impl eframe::App for RemoteDesktopApp {
         };
 
         if let Some((peer_name, peer_id, peer_addr)) = consent_info {
-            egui::Window::new("Richiesta di Controllo Remoto")
+            egui::Window::new(lang.pick("Remote Control Request", "Richiesta di Controllo Remoto"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -385,14 +402,21 @@ impl eframe::App for RemoteDesktopApp {
                             .color(TEXT_MUTED),
                     );
                     ui.add_space(6.0);
-                    ui.label("Chiede di visualizzare e controllare questo computer.");
-                    ui.small("Per sicurezza, mouse e tastiera partiranno disabilitati.");
+                    ui.label(lang.pick(
+                        "Requests to view and control this computer.",
+                        "Chiede di visualizzare e controllare questo computer.",
+                    ));
+                    ui.small(lang.pick(
+                        "For safety, mouse and keyboard start disabled.",
+                        "Per sicurezza, mouse e tastiera partiranno disabilitati.",
+                    ));
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new("Accetta").color(egui::Color32::BLACK),
+                                    egui::RichText::new(lang.pick("Accept", "Accetta"))
+                                        .color(egui::Color32::BLACK),
                                 )
                                 .fill(OK_GREEN)
                                 .min_size(egui::vec2(110.0, 32.0)),
@@ -404,7 +428,8 @@ impl eframe::App for RemoteDesktopApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new("Rifiuta").color(egui::Color32::BLACK),
+                                    egui::RichText::new(lang.pick("Decline", "Rifiuta"))
+                                        .color(egui::Color32::BLACK),
                                 )
                                 .fill(ERR_RED)
                                 .min_size(egui::vec2(110.0, 32.0)),
@@ -431,7 +456,7 @@ impl eframe::App for RemoteDesktopApp {
         // 1c. Show session-ended modal if present
         let mut clear_notice = false;
         if let Some(notice) = &self.session_notice {
-            egui::Window::new("Avviso Sessione")
+            egui::Window::new(lang.pick("Session Notice", "Avviso Sessione"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -464,7 +489,7 @@ impl eframe::App for RemoteDesktopApp {
             let email_copied = self.is_copied("info_email");
             let discord_copied = self.is_copied("info_discord");
 
-            egui::Window::new("Info — TheBoysDesk")
+            egui::Window::new(lang.pick("About — TheBoysDesk", "Info — TheBoysDesk"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -472,22 +497,31 @@ impl eframe::App for RemoteDesktopApp {
                     ui.set_min_width(350.0);
                     ui.label(egui::RichText::new("TheBoysDesk").size(20.0).strong());
                     ui.label(
-                        egui::RichText::new("Versione 0.1.0  •  Controllo remoto P2P")
-                            .color(TEXT_MUTED)
-                            .size(12.5),
+                        egui::RichText::new(lang.pick(
+                            "Version 0.1.0  •  P2P Remote Desktop",
+                            "Versione 0.1.0  •  Controllo remoto P2P",
+                        ))
+                        .color(TEXT_MUTED)
+                        .size(12.5),
                     );
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(8.0);
 
-                    ui.label(egui::RichText::new("Fatta da Marco Venditti").size(15.0).strong());
+                    ui.label(
+                        egui::RichText::new(lang.pick(
+                            "Made by Marco Venditti",
+                            "Fatta da Marco Venditti",
+                        ))
+                        .size(15.0)
+                        .strong(),
+                    );
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Email:").color(TEXT_MUTED));
                         ui.monospace("mark09venditti@gmail.com");
-                        let lbl = if email_copied { "Copiato!" } else { "Copia" };
-                        if ui.small_button(lbl).clicked() {
+                        if ui.small_button(lang.copy_label(email_copied)).clicked() {
                             copy_req = Some(("info_email", "mark09venditti@gmail.com"));
                         }
                     });
@@ -495,24 +529,27 @@ impl eframe::App for RemoteDesktopApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Discord:").color(TEXT_MUTED));
                         ui.monospace("cicciobaudo");
-                        let lbl = if discord_copied { "Copiato!" } else { "Copia" };
-                        if ui.small_button(lbl).clicked() {
+                        if ui.small_button(lang.copy_label(discord_copied)).clicked() {
                             copy_req = Some(("info_discord", "cicciobaudo"));
                         }
                     });
 
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("Con l'aiuto di LatiosJet")
-                            .color(ACCENT_BLUE)
-                            .strong(),
+                        egui::RichText::new(lang.pick(
+                            "With help from LatiosJet",
+                            "Con l'aiuto di LatiosJet",
+                        ))
+                        .color(ACCENT_BLUE)
+                        .strong(),
                     );
                     ui.add_space(14.0);
 
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("Chiudi").color(egui::Color32::WHITE),
+                                egui::RichText::new(lang.pick("Close", "Chiudi"))
+                                    .color(egui::Color32::WHITE),
                             )
                             .fill(ACCENT_BLUE)
                             .min_size(egui::vec2(100.0, 32.0)),
@@ -569,16 +606,20 @@ impl eframe::App for RemoteDesktopApp {
                 )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.colored_label(
-                            WARN_AMBER,
-                            egui::RichText::new(format!("● SESSIONE ATTIVA — {peer}")).strong(),
-                        );
+                        let banner_hdr = match lang {
+                            Lang::En => format!("● ACTIVE SESSION — {peer}"),
+                            Lang::It => format!("● SESSIONE ATTIVA — {peer}"),
+                        };
+                        ui.colored_label(WARN_AMBER, egui::RichText::new(banner_hdr).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("Disconnetti (Ctrl+Alt+D)")
-                                            .color(egui::Color32::WHITE),
+                                        egui::RichText::new(lang.pick(
+                                            "Disconnect (Ctrl+Alt+D)",
+                                            "Disconnetti (Ctrl+Alt+D)",
+                                        ))
+                                        .color(egui::Color32::WHITE),
                                     )
                                     .fill(egui::Color32::from_rgb(185, 28, 28)),
                                 )
@@ -608,9 +649,9 @@ impl eframe::App for RemoteDesktopApp {
                         }
 
                         let kbd_lbl = if kbd_on {
-                            "Tastiera: ON (Ctrl+Alt+K)"
+                            lang.pick("Keyboard: ON (Ctrl+Alt+K)", "Tastiera: ON (Ctrl+Alt+K)")
                         } else {
-                            "Tastiera: OFF (Ctrl+Alt+K)"
+                            lang.pick("Keyboard: OFF (Ctrl+Alt+K)", "Tastiera: OFF (Ctrl+Alt+K)")
                         };
                         if ui
                             .button(egui::RichText::new(kbd_lbl).color(if kbd_on {
@@ -624,9 +665,9 @@ impl eframe::App for RemoteDesktopApp {
                         }
 
                         let both_lbl = if both_blocked {
-                            "Abilita Entrambi (Ctrl+Alt+B)"
+                            lang.pick("Enable Both (Ctrl+Alt+B)", "Abilita Entrambi (Ctrl+Alt+B)")
                         } else {
-                            "Blocca Entrambi (Ctrl+Alt+B)"
+                            lang.pick("Block Both (Ctrl+Alt+B)", "Blocca Entrambi (Ctrl+Alt+B)")
                         };
                         if ui.button(both_lbl).clicked() {
                             let target = both_blocked;
@@ -639,14 +680,29 @@ impl eframe::App for RemoteDesktopApp {
                         ui.add_space(4.0);
                         ui.colored_label(
                             ERR_RED,
-                            "⚠ Mouse e tastiera sono disabilitati. Abilitali per consentire il controllo.",
+                            lang.pick(
+                                "⚠ Mouse and keyboard are disabled. Enable them to allow control.",
+                                "⚠ Mouse e tastiera sono disabilitati. Abilitali per consentire il controllo.",
+                            ),
                         );
                     } else if !mouse_on {
                         ui.add_space(4.0);
-                        ui.colored_label(WARN_AMBER, "⚠ Mouse disabilitato (solo tastiera attiva).");
+                        ui.colored_label(
+                            WARN_AMBER,
+                            lang.pick(
+                                "⚠ Mouse disabled (keyboard only).",
+                                "⚠ Mouse disabilitato (solo tastiera attiva).",
+                            ),
+                        );
                     } else if !kbd_on {
                         ui.add_space(4.0);
-                        ui.colored_label(WARN_AMBER, "⚠ Tastiera disabilitata (solo mouse attivo).");
+                        ui.colored_label(
+                            WARN_AMBER,
+                            lang.pick(
+                                "⚠ Keyboard disabled (mouse only).",
+                                "⚠ Tastiera disabilitata (solo mouse attivo).",
+                            ),
+                        );
                     }
                 });
         }
@@ -687,23 +743,33 @@ impl eframe::App for RemoteDesktopApp {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("TheBoysDesk").size(27.0).strong());
                     ui.label(
-                        egui::RichText::new("Controllo remoto P2P crittografato (QUIC / TLS 1.3)")
+                        egui::RichText::new(lang.subtitle())
                             .color(TEXT_MUTED)
                             .size(14.0),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(lang.switch_button_label()).clicked() {
+                        self.lang = self.lang.toggle();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                            self.lang.window_title().to_string(),
+                        ));
+                    }
                     if ui.button("Info").clicked() {
                         self.show_info_modal = true;
                     }
                     ui.add_space(6.0);
                     let upnp_state = *self.upnp_ok.lock().unwrap();
-                    let (badge_txt, badge_col) = match upnp_state {
-                        Some(true) => ("● P2P Internet Pronto (UPnP)", OK_GREEN),
-                        Some(false) => ("● Pronto in LAN (UPnP disattivo)", WARN_AMBER),
-                        None => ("● Verifica rete...", TEXT_MUTED),
+                    let badge_col = match upnp_state {
+                        Some(true) => OK_GREEN,
+                        Some(false) => WARN_AMBER,
+                        None => TEXT_MUTED,
                     };
-                    ui.label(egui::RichText::new(badge_txt).color(badge_col).size(12.5));
+                    ui.label(
+                        egui::RichText::new(lang.net_badge(upnp_state))
+                            .color(badge_col)
+                            .size(12.5),
+                    );
                 });
             });
 
@@ -717,17 +783,28 @@ impl eframe::App for RemoteDesktopApp {
                     ui.horizontal(|ui| {
                         draw_monitor_icon(ui);
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Ricevi Assistenza").size(20.0).strong());
                             ui.label(
-                                egui::RichText::new("Condividi indirizzo e PIN con chi ti aiuta")
-                                    .color(TEXT_MUTED)
-                                    .size(12.0),
+                                egui::RichText::new(lang.pick("Receive Support", "Ricevi Assistenza"))
+                                    .size(20.0)
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(lang.pick(
+                                    "Share your address and PIN with your helper",
+                                    "Condividi indirizzo e PIN con chi ti aiuta",
+                                ))
+                                .color(TEXT_MUTED)
+                                .size(12.0),
                             );
                         });
                     });
                     ui.add_space(10.0);
 
-                    ui.label(egui::RichText::new("IL TUO ID DISPOSITIVO").size(11.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(lang.pick("YOUR DEVICE ID", "IL TUO ID DISPOSITIVO"))
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                    );
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(&self.device_id)
@@ -735,14 +812,17 @@ impl eframe::App for RemoteDesktopApp {
                                 .strong()
                                 .monospace(),
                         );
-                        let lbl = if self.is_copied("id") { "Copiato!" } else { "Copia" };
-                        if ui.small_button(lbl).clicked() {
+                        if ui.small_button(lang.copy_label(self.is_copied("id"))).clicked() {
                             self.copy_with_feedback(ctx, "id", self.device_id.clone());
                         }
                     });
 
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("PIN DI SESSIONE").size(11.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(lang.pick("SESSION PIN", "PIN DI SESSIONE"))
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                    );
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(&self.local_pin)
@@ -751,11 +831,10 @@ impl eframe::App for RemoteDesktopApp {
                                 .monospace()
                                 .color(ACCENT_BLUE),
                         );
-                        let pin_lbl = if self.is_copied("pin") { "Copiato!" } else { "Copia" };
-                        if ui.small_button(pin_lbl).clicked() {
+                        if ui.small_button(lang.copy_label(self.is_copied("pin"))).clicked() {
                             self.copy_with_feedback(ctx, "pin", self.local_pin.clone());
                         }
-                        if ui.small_button("Rigenera").clicked() {
+                        if ui.small_button(lang.pick("Regenerate", "Rigenera")).clicked() {
                             let new_pin = generate_session_pin();
                             self.local_pin = new_pin.clone();
                             let hs = self.host_state.clone();
@@ -773,23 +852,26 @@ impl eframe::App for RemoteDesktopApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("LAN:").color(TEXT_MUTED));
                         ui.monospace(&lan_str);
-                        let lbl = if self.is_copied("lan") { "Copiato!" } else { "Copia" };
-                        if ui.small_button(lbl).clicked() {
+                        if ui.small_button(lang.copy_label(self.is_copied("lan"))).clicked() {
                             self.copy_with_feedback(ctx, "lan", lan_str);
                         }
                     });
 
-                    let pub_str = self.public_addr_str.lock().unwrap().clone();
+                    let pub_str = match &*self.public_addr_state.lock().unwrap() {
+                        None => lang.pick("Detecting...", "Rilevamento...").to_string(),
+                        Some(None) => lang.pick("Not detected", "Non rilevato").to_string(),
+                        Some(Some(s)) => s.clone(),
+                    };
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Internet:").color(TEXT_MUTED));
                         ui.monospace(&pub_str);
-                        let lbl = if self.is_copied("pub") { "Copiato!" } else { "Copia" };
-                        if ui.small_button(lbl).clicked() {
+                        if ui.small_button(lang.copy_label(self.is_copied("pub"))).clicked() {
                             self.copy_with_feedback(ctx, "pub", pub_str);
                         }
                     });
 
-                    let upnp_note = self.upnp_note.lock().unwrap().clone();
+                    let upnp_state = *self.upnp_ok.lock().unwrap();
+                    let upnp_note = lang.upnp_note_text(upnp_state, self.endpoint.local_port());
                     ui.label(egui::RichText::new(upnp_note).size(11.5).color(TEXT_MUTED));
                 });
 
@@ -799,28 +881,46 @@ impl eframe::App for RemoteDesktopApp {
                     ui.horizontal(|ui| {
                         draw_arrows_icon(ui);
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Controlla un altro PC").size(20.0).strong());
                             ui.label(
-                                egui::RichText::new("Inserisci l'indirizzo IP:Porta e il PIN del PC remoto")
-                                    .color(TEXT_MUTED)
-                                    .size(12.0),
+                                egui::RichText::new(lang.pick(
+                                    "Control Another PC",
+                                    "Controlla un altro PC",
+                                ))
+                                .size(20.0)
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(lang.pick(
+                                    "Enter the remote PC's IP:Port and PIN",
+                                    "Inserisci l'indirizzo IP:Porta e il PIN del PC remoto",
+                                ))
+                                .color(TEXT_MUTED)
+                                .size(12.0),
                             );
                         });
                     });
                     ui.add_space(12.0);
 
-                    ui.label(egui::RichText::new("Indirizzo IP:Porta").size(12.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(lang.pick("IP:Port Address", "Indirizzo IP:Porta"))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
                     let addr_resp = ui.add(
                         egui::TextEdit::singleline(&mut self.target_addr_input)
-                            .hint_text("es. 192.168.1.50:21116")
+                            .hint_text(lang.pick("e.g. 192.168.1.50:21116", "es. 192.168.1.50:21116"))
                             .desired_width(f32::INFINITY),
                     );
 
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("PIN di sessione").size(12.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(lang.pick("Session PIN", "PIN di sessione"))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
                     let pin_resp = ui.add(
                         egui::TextEdit::singleline(&mut self.target_pin_input)
-                            .hint_text("es. 123456")
+                            .hint_text(lang.pick("e.g. 123456", "es. 123456"))
                             .desired_width(f32::INFINITY),
                     );
 
@@ -832,7 +932,9 @@ impl eframe::App for RemoteDesktopApp {
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(!is_connecting, |ui| {
                             let btn = egui::Button::new(
-                                egui::RichText::new("Connetti").color(egui::Color32::WHITE).strong(),
+                                egui::RichText::new(lang.pick("Connect", "Connetti"))
+                                    .color(egui::Color32::WHITE)
+                                    .strong(),
                             )
                             .fill(ACCENT_BLUE)
                             .min_size(egui::vec2(140.0, 38.0));
@@ -843,14 +945,16 @@ impl eframe::App for RemoteDesktopApp {
 
                         if is_connecting {
                             ui.spinner();
-                            if ui.button("Annulla").clicked() {
+                            if ui.button(lang.pick("Cancel", "Annulla")).clicked() {
                                 if let Some(h) = self.connect_task.take() {
                                     h.abort();
                                 }
                                 *self.connecting.lock().unwrap() = false;
                                 *self.connect_progress.lock().unwrap() = None;
-                                *self.connect_error.lock().unwrap() =
-                                    Some("Connessione annullata".into());
+                                *self.connect_error.lock().unwrap() = Some(
+                                    lang.pick("Connection cancelled", "Connessione annullata")
+                                        .into(),
+                                );
                             }
                         }
                     });
@@ -874,7 +978,14 @@ impl eframe::App for RemoteDesktopApp {
                 ui.set_min_height(92.0);
                 ui.horizontal(|ui| {
                     draw_lan_icon(ui);
-                    ui.label(egui::RichText::new("Dispositivi rilevati in LAN").size(15.0).strong());
+                    ui.label(
+                        egui::RichText::new(lang.pick(
+                            "LAN Devices",
+                            "Dispositivi rilevati in LAN",
+                        ))
+                        .size(15.0)
+                        .strong(),
+                    );
                 });
                 ui.add_space(4.0);
 
@@ -882,8 +993,11 @@ impl eframe::App for RemoteDesktopApp {
                     if let Ok(peers) = peers_arc.try_read() {
                         if peers.is_empty() {
                             ui.label(
-                                egui::RichText::new("Nessun altro dispositivo rilevato sulla rete locale...")
-                                    .color(TEXT_MUTED),
+                                egui::RichText::new(lang.pick(
+                                    "No other devices found on the local network...",
+                                    "Nessun altro dispositivo rilevato sulla rete locale...",
+                                ))
+                                .color(TEXT_MUTED),
                             );
                         } else {
                             for peer in peers.values() {
@@ -897,7 +1011,10 @@ impl eframe::App for RemoteDesktopApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.button("Usa indirizzo").clicked() {
+                                            if ui
+                                                .button(lang.pick("Use address", "Usa indirizzo"))
+                                                .clicked()
+                                            {
                                                 self.target_addr_input = peer.addr.to_string();
                                             }
                                         },
@@ -919,6 +1036,7 @@ fn ctx_or_ui_hack(ui: &mut egui::Ui) -> &mut egui::Ui {
 
 impl RemoteDesktopApp {
     fn render_client_viewer(&mut self, ctx: &egui::Context, disconnect: &mut bool) {
+        let lang = self.lang;
         let mut guard = self.client_session.lock().unwrap();
         let Some(sess) = guard.as_mut() else {
             return;
@@ -962,7 +1080,8 @@ impl RemoteDesktopApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new("Disconnetti").color(egui::Color32::WHITE),
+                                    egui::RichText::new(lang.pick("Disconnect", "Disconnetti"))
+                                        .color(egui::Color32::WHITE),
                                 )
                                 .fill(egui::Color32::from_rgb(185, 28, 28)),
                             )
@@ -975,7 +1094,7 @@ impl RemoteDesktopApp {
 
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.fit_to_window, "Adatta");
+                    ui.checkbox(&mut self.fit_to_window, lang.pick("Fit", "Adatta"));
                     ui.separator();
 
                     if sess.monitors.len() > 1 {
@@ -1025,9 +1144,9 @@ impl RemoteDesktopApp {
                     if ui
                         .button(
                             egui::RichText::new(if self.send_keyboard {
-                                "Tastiera: ON"
+                                lang.pick("Keyboard: ON", "Tastiera: ON")
                             } else {
-                                "Tastiera: OFF"
+                                lang.pick("Keyboard: OFF", "Tastiera: OFF")
                             })
                             .color(if self.send_keyboard { OK_GREEN } else { ERR_RED }),
                         )
@@ -1041,7 +1160,11 @@ impl RemoteDesktopApp {
 
                     let both_off = !self.send_mouse && !self.send_keyboard;
                     if ui
-                        .button(if both_off { "Ripristina Input" } else { "Solo Vista" })
+                        .button(if both_off {
+                            lang.pick("Resume Input", "Ripristina Input")
+                        } else {
+                            lang.pick("View Only", "Solo Vista")
+                        })
                         .clicked()
                     {
                         self.send_mouse = both_off;
@@ -1075,7 +1198,10 @@ impl RemoteDesktopApp {
             .show(ctx, |ui| {
                 let Some(tex) = &self.remote_texture else {
                     ui.centered_and_justified(|ui| {
-                        ui.label("In attesa del primo frame video...");
+                        ui.label(lang.pick(
+                            "Waiting for the first video frame...",
+                            "In attesa del primo frame video...",
+                        ));
                     });
                     return;
                 };

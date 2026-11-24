@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::i18n::Lang;
 use capture::{list_monitors, CaptureError, DxgiCapturer};
 use codec::{DecodedFrame, H264Decoder, H264Encoder};
 use crypto::{cert_fingerprint_sha256, compute_pin_proof, generate_nonce, verify_pin_proof};
@@ -196,7 +197,7 @@ async fn handle_host_connection(
             &ControlMessage::AuthResult {
                 accepted: false,
                 reason: Some(format!(
-                    "Troppi tentativi errati. Riprova tra {wait_secs}s"
+                    "Too many failed attempts. Retry in {wait_secs}s"
                 )),
                 monitors: vec![],
             },
@@ -237,7 +238,7 @@ async fn handle_host_connection(
             &mut ctrl_send,
             &ControlMessage::AuthResult {
                 accepted: false,
-                reason: Some("PIN non valido".into()),
+                reason: Some("Invalid PIN".into()),
                 monitors: vec![],
             },
         )
@@ -267,7 +268,7 @@ async fn handle_host_connection(
             &mut ctrl_send,
             &ControlMessage::AuthResult {
                 accepted: false,
-                reason: Some("Host occupato in un'altra sessione".into()),
+                reason: Some("Host is busy in another session".into()),
                 monitors: vec![],
             },
         )
@@ -295,7 +296,7 @@ async fn handle_host_connection(
             &mut ctrl_send,
             &ControlMessage::AuthResult {
                 accepted: false,
-                reason: Some("Connessione rifiutata dall'utente remoto".into()),
+                reason: Some("Connection declined by remote user".into()),
                 monitors: vec![],
             },
         )
@@ -395,7 +396,7 @@ async fn handle_host_connection(
             _ = disc_rx.changed() => {
                 if *disc_rx.borrow() {
                     let _ = write_frame(&mut ctrl_send, &ControlMessage::Disconnect {
-                        reason: "Sei stato disconnesso dall'host".into(),
+                        reason: "Disconnected by host".into(),
                     }).await;
                     let _ = ctrl_send.finish();
                     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -427,11 +428,11 @@ async fn handle_host_connection(
                         }
                     }
                     Ok(ControlMessage::Disconnect { .. }) => {
-                        end_notice = Some(format!("{client_name} ha terminato la connessione."));
+                        end_notice = Some(format!("{client_name} ended the session."));
                         break;
                     }
                     Err(_) => {
-                        end_notice = Some(format!("{client_name} ha perso la connessione (rete caduta o timeout)."));
+                        end_notice = Some(format!("{client_name} lost connection (network drop or timeout)."));
                         break;
                     }
                     _ => {}
@@ -570,12 +571,14 @@ pub fn compute_rtt_ms(now_us: u64, sent_us: u64) -> Option<u32> {
 
 /// Connects to a remote host, authenticates with the session PIN, and starts
 /// receiving video + sending input.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_client_session(
     endpoint: Arc<P2pEndpoint>,
     addr: SocketAddr,
     pin: String,
     local_name: String,
     local_id: String,
+    lang: Lang,
     ctx: egui::Context,
     progress: Arc<Mutex<Option<String>>>,
 ) -> anyhow::Result<ClientSessionHandle> {
@@ -584,13 +587,21 @@ pub async fn connect_client_session(
         ctx.request_repaint();
     };
 
-    set_progress(&format!("Connessione QUIC a {addr}..."));
+    set_progress(&match lang {
+        Lang::En => format!("Connecting via QUIC to {addr}..."),
+        Lang::It => format!("Connessione QUIC a {addr}..."),
+    });
     let conn = tokio::time::timeout(Duration::from_secs(6), endpoint.connect(addr))
         .await
         .map_err(|_| {
-            anyhow::anyhow!(
-                "Timeout di connessione (6s): impossibile raggiungere {addr}. Verifica IP, porta UDP o firewall."
-            )
+            anyhow::anyhow!(match lang {
+                Lang::En => format!(
+                    "Connection timeout (6s): cannot reach {addr}. Check IP, UDP port, or firewall."
+                ),
+                Lang::It => format!(
+                    "Timeout di connessione (6s): impossibile raggiungere {addr}. Verifica IP, porta UDP o firewall."
+                ),
+            })
         })??;
 
     // TLS Channel Binding: extract the host's presented certificate SHA-256.
@@ -599,13 +610,20 @@ pub async fn connect_client_session(
         .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
         .and_then(|certs| certs.into_iter().next())
         .map(|cert| cert_fingerprint_sha256(cert.as_ref()))
-        .ok_or_else(|| anyhow::anyhow!("certificato TLS dell'host mancante"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(lang.pick("Missing host TLS certificate", "Certificato TLS dell'host mancante"))
+        })?;
 
-    set_progress("Negoziazione canale di controllo...");
+    set_progress(lang.pick("Negotiating control channel...", "Negoziazione canale di controllo..."));
     let (mut ctrl_send, mut ctrl_recv) =
         tokio::time::timeout(Duration::from_secs(5), open_bi_stream(&conn, StreamKind::Control))
             .await
-            .map_err(|_| anyhow::anyhow!("Timeout apertura stream di controllo"))??;
+            .map_err(|_| {
+                anyhow::anyhow!(lang.pick(
+                    "Control stream timeout",
+                    "Timeout apertura stream di controllo"
+                ))
+            })??;
 
     write_frame(
         &mut ctrl_send,
@@ -622,13 +640,18 @@ pub async fn connect_client_session(
         read_frame_limited::<_, ControlMessage>(&mut ctrl_recv, MAX_CONTROL_FRAME_SIZE),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Timeout attesa challenge dall'host"))??
+    .map_err(|_| {
+        anyhow::anyhow!(lang.pick(
+            "Host challenge timeout",
+            "Timeout attesa challenge dall'host"
+        ))
+    })??
     {
         ControlMessage::AuthChallenge { nonce, .. } => nonce,
-        _ => anyhow::bail!("risposta inattesa dall'host"),
+        _ => anyhow::bail!(lang.pick("Unexpected response from host", "Risposta inattesa dall'host")),
     };
 
-    set_progress("Verifica PIN in corso...");
+    set_progress(lang.pick("Verifying PIN...", "Verifica PIN in corso..."));
     let pin_proof = compute_pin_proof(&challenge, &host_cert_sha256, &pin);
     write_frame(&mut ctrl_send, &ControlMessage::AuthResponse { pin_proof }).await?;
 
@@ -638,13 +661,23 @@ pub async fn connect_client_session(
             read_frame_limited::<_, ControlMessage>(&mut ctrl_recv, MAX_CONTROL_FRAME_SIZE),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Timeout: nessuna risposta dall'host (45s scaduti)"))??;
+        .map_err(|_| {
+            anyhow::anyhow!(lang.pick(
+                "Timeout: no response from host (45s expired)",
+                "Timeout: nessuna risposta dall'host (45s scaduti)"
+            ))
+        })??;
 
         match msg {
             ControlMessage::AuthPendingConsent { host_name } => {
-                set_progress(&format!(
-                    "Connessione stabilita! Richiesta arrivata a \"{host_name}\" — in attesa di accettazione..."
-                ));
+                set_progress(&match lang {
+                    Lang::En => format!(
+                        "Connected! Request delivered to \"{host_name}\" — waiting for acceptance..."
+                    ),
+                    Lang::It => format!(
+                        "Connessione stabilita! Richiesta arrivata a \"{host_name}\" — in attesa di accettazione..."
+                    ),
+                });
             }
             ControlMessage::AuthResult {
                 accepted: true,
@@ -656,9 +689,9 @@ pub async fn connect_client_session(
                 reason,
                 ..
             } => {
-                anyhow::bail!(reason.unwrap_or_else(|| "Accesso negato".into()));
+                anyhow::bail!(reason.unwrap_or_else(|| lang.pick("Access denied", "Accesso negato").into()));
             }
-            _ => anyhow::bail!("risposta di autenticazione non valida"),
+            _ => anyhow::bail!(lang.pick("Invalid authentication response", "Risposta di autenticazione non valida")),
         }
     };
 
@@ -669,7 +702,10 @@ pub async fn connect_client_session(
         .map(|m| m.id)
         .unwrap_or(0);
     let latest_frame = Arc::new(Mutex::new(None));
-    let status_text = Arc::new(Mutex::new(format!("Connesso a {addr}")));
+    let status_text = Arc::new(Mutex::new(match lang {
+        Lang::En => format!("Connected to {addr}"),
+        Lang::It => format!("Connesso a {addr}"),
+    }));
     let fps = Arc::new(Mutex::new(0.0f32));
     let rtt_ms: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEvent>();
@@ -699,7 +735,7 @@ pub async fn connect_client_session(
         let mut decoder = match H264Decoder::new() {
             Ok(d) => d,
             Err(e) => {
-                *status_slot.lock().unwrap() = format!("Errore decoder H264: {e}");
+                *status_slot.lock().unwrap() = format!("H264 decoder error: {e}");
                 return;
             }
         };
@@ -724,9 +760,15 @@ pub async fn connect_client_session(
         }
         let mut end_guard = ended_vid.lock().unwrap();
         if end_guard.is_none() {
-            *end_guard = Some("Hai perso la connessione con il PC remoto.".into());
+            *end_guard = Some(
+                lang.pick(
+                    "Connection lost with the remote PC.",
+                    "Hai perso la connessione con il PC remoto.",
+                )
+                .into(),
+            );
         }
-        *status_slot.lock().unwrap() = "Sessione terminata".into();
+        *status_slot.lock().unwrap() = lang.pick("Session ended", "Sessione terminata").into();
         ctx_vid.request_repaint();
     });
 
@@ -757,7 +799,7 @@ pub async fn connect_client_session(
                 _ = disconnect_rx.changed() => {
                     if *disconnect_rx.borrow() {
                         let _ = write_frame(&mut ctrl_send, &ControlMessage::Disconnect {
-                            reason: "Disconnesso dal client".into(),
+                            reason: "Disconnected by client".into(),
                         }).await;
                         let _ = ctrl_send.finish();
                         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -783,7 +825,13 @@ pub async fn connect_client_session(
                         Err(_) => {
                             let mut end_guard = ended_ctrl.lock().unwrap();
                             if end_guard.is_none() {
-                                *end_guard = Some("Hai perso la connessione con il PC remoto.".into());
+                                *end_guard = Some(
+                                    lang.pick(
+                                        "Connection lost with the remote PC.",
+                                        "Hai perso la connessione con il PC remoto.",
+                                    )
+                                    .into(),
+                                );
                             }
                             break;
                         }

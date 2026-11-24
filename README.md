@@ -1,21 +1,43 @@
-# TheBoysDesk + Feature & Quality AI Agent Team
+**Language:** English | [Italiano](README.it.md)
 
-Applicazione desktop P2P in **Rust** per il controllo remoto su Windows (zero server centrali, QUIC TLS 1.3, DXGI + OpenH264, `egui`) affiancata dal tuo **Team di 5 Agenti AI** (`.agents/skills/team-*`) con grafo parallelo, loop di qualità (max 2 round) e loop di miglioramento settimanale.
+# TheBoysDesk
 
-## Cosa risolve
-1. **Controllo remoto P2P privato e sicuro** tra amici senza server intermedi, con PIN + channel binding TLS, accettazione esplicita e mouse/tastiera bloccati di default.
-2. **Sviluppo assistito da un vero team AI**: automatizza analisi (`Scout`), design/sicurezza (`Architect`), implementazione+test (`Builder`) e review indipendente (`Checker`) sotto un unico `Lead`.
+Lightweight, fast, and secure **peer-to-peer remote desktop** application for Windows 10/11 written in **Rust** — zero central servers, end-to-end encrypted via **QUIC (TLS 1.3)**, **DXGI Desktop Duplication**, **OpenH264**, and native **`egui`** UI with instant **EN / IT** language switching.
 
-## Installazione e Avvio in 3 Step
-1. **Compila ed esegui l'app desktop:**
+## Key Features
+- **Pure Peer-to-Peer (No Central Servers):** Automatic LAN discovery, automatic router port mapping via **UPnP (IGD)**, public IP discovery via **STUN**, and direct QUIC connection.
+- **Security First:**
+  - TLS 1.3 encryption with **TLS channel-bound PIN verification** (protects against MitM certificate substitution).
+  - Brute-force PIN rate limiting (60s lockout after 5 failed attempts).
+  - Explicit manual consent popup on the host before any session starts.
+  - **Mouse and keyboard start disabled by default** (view-only) on every new session, with visible on-screen toggles and shortcuts (`Ctrl+Alt+M`, `Ctrl+Alt+K`, `Ctrl+Alt+B`, `Ctrl+Alt+D`).
+- **Low-Latency Remote Control:** DXGI capture, OpenH264 real-time encoding, multi-monitor selector (`M1`, `M2`, ...), live FPS & RTT (`ms`) indicator, and hardware scan-code input injection (`SendInput`).
+- **Instant Language Switch:** English by default with a 1-click **EN / IT** toggle in the header.
+- **AI Agent Team Included:** Workspace skills in `.agents/skills/team-*` (`team-lead`, `team-scout`, `team-architect`, `team-builder`, `team-checker`) with quality & weekly improvement loops in `team/`.
+
+## Quick Start (3 Steps)
+
+### Option A — Download Portable Binary
+1. Download **`TheBoysDesk.exe`** from the [v0.1.0 Release](https://github.com/marcolinovalorantoso-source/TheBoysDesk/releases/tag/v0.1.0).
+2. Run `TheBoysDesk.exe` on both Windows PCs (no installation required; allow Windows Firewall prompt on first launch).
+3. Share your LAN or Internet `IP:Port` and 6-digit `Session PIN`, click **Connect**, and accept the prompt on the host.
+
+### Option B — Build from Source
+1. Run the workspace unit tests:
    ```powershell
    cargo test --workspace
+   ```
+2. Build the release executable:
+   ```powershell
    cargo build --release -p desktop
    .\target\release\TheBoysDesk.exe
    ```
-2. **Verifica e lancia il Team AI (1 comando):**
+3. *(Optional)* Verify the AI Agent Team setup:
    ```powershell
    powershell -ExecutionPolicy Bypass -File team\run_team.ps1 -Verify -WeeklyReview
    ```
-3. **Esegui un task reale in Antigravity:**
-   Avvia il prompt generato da `team\run_team.ps1 "Descrivi il tuo task"` (attiva la skill `team-lead` che coordina `team-scout`, `team-architect`, `team-builder` e `team-checker`).
+
+## Credits
+- Created by **Marco Venditti** (`mark09venditti@gmail.com` • Discord: `cicciobaudo`)
+- With help from **LatiosJet**
+- Licensed under the [MIT License](LICENSE).
