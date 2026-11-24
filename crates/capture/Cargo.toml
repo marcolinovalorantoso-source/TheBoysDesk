@@ -1,0 +1,9 @@
+[package]
+name = "capture"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+protocol.workspace = true
+thiserror.workspace = true
+windows.workspace = true

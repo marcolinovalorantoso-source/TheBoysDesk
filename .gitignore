@@ -1,0 +1,8 @@
+/target/
+*.exe
+*.lnk
+/images.jpeg
+apps/desktop/assets/icon.jpeg
+.DS_Store
+Thumbs.db
+*.log

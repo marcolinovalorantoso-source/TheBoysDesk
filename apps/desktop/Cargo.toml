@@ -1,0 +1,25 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "TheBoysDesk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+capture.workspace = true
+codec.workspace = true
+crypto.workspace = true
+eframe.workspace = true
+egui.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+input.workspace = true
+net.workspace = true
+protocol.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

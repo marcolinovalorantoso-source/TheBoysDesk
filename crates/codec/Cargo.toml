@@ -1,0 +1,8 @@
+[package]
+name = "codec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+openh264.workspace = true
+thiserror.workspace = true

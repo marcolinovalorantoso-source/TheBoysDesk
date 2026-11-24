@@ -1,0 +1,16 @@
+[package]
+name = "net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crypto.workspace = true
+igd-next.workspace = true
+postcard.workspace = true
+protocol.workspace = true
+quinn.workspace = true
+rand.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
