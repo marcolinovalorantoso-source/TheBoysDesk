@@ -37,6 +37,13 @@ Lightweight, fast, and secure **peer-to-peer remote desktop** application for Wi
    powershell -ExecutionPolicy Bypass -File team\run_team.ps1 -Verify -WeeklyReview
    ```
 
+## Requirements & Troubleshooting (Windows)
+- **Zero External DLLs Required (100% Standalone):** `TheBoysDesk.exe` statically links the C++ runtime (`libstdc++` / `libgcc`) and uses only built-in Windows DLLs (`KERNEL32`, `USER32`, `D3D11`, `DXGI`, `OPENGL32`, `msvcrt.dll`). If an earlier build failed with *"libstdc++-6.dll was not found"*, re-download the latest `TheBoysDesk.exe` from [Release v0.1.0](https://github.com/marcolinovalorantoso-source/TheBoysDesk/releases/tag/v0.1.0).
+- **System Requirements:** Windows 10 or Windows 11 (64-bit) with up-to-date GPU drivers supporting **OpenGL 2.0+** and **DirectX 11** (needed for the `egui` window and DXGI screen capture).
+- **Windows SmartScreen ("Windows protected your PC"):** Because the binary is unsigned, click **"More info" → "Run anyway"** on first launch.
+- **Older Windows 10 Systems (Optional):** If Windows reports a missing `api-ms-win-crt-*` / Universal CRT library on an unpatched machine, install Microsoft's official [Visual C++ Redistributable x64 (`vc_redist.x64.exe`)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+- **Firewall & Router:** Allow `TheBoysDesk.exe` on Private & Public networks in Windows Firewall. For connections outside your LAN, enable **UPnP** on your router or forward UDP port **`21116`**.
+
 ## Credits
 - Created by **Marco Venditti** (`mark09venditti@gmail.com` • Discord: `cicciobaudo`)
 - With help from **LatiosJet**

@@ -37,6 +37,13 @@ Applicazione desktop **peer-to-peer per il controllo remoto** su Windows 10/11 s
    powershell -ExecutionPolicy Bypass -File team\run_team.ps1 -Verify -WeeklyReview
    ```
 
+## Requisiti e Risoluzione Problemi (Windows)
+- **Eseguibile 100% Standalone (Nessuna DLL da scaricare):** `TheBoysDesk.exe` integra staticamente il runtime C++ (`libstdc++` / `libgcc`) e usa solo librerie di sistema incluse in Windows (`KERNEL32`, `USER32`, `D3D11`, `DXGI`, `OPENGL32`, `msvcrt.dll`). Se una versione precedente dava errore *"libstdc++-6.dll non trovata"*, riscarica l'ultimo `TheBoysDesk.exe` dalla [Release v0.1.0](https://github.com/marcolinovalorantoso-source/TheBoysDesk/releases/tag/v0.1.0).
+- **Requisiti di sistema:** Windows 10 o Windows 11 (64-bit) con driver scheda video aggiornati con supporto **OpenGL 2.0+** e **DirectX 11** (necessari per finestra `egui` e cattura DXGI).
+- **Windows SmartScreen ("PC protetto da Windows"):** essendo un eseguibile open-source senza firma a pagamento, al primo avvio clicca **"Ulteriori informazioni" → "Esegui comunque"**.
+- **Windows 10 molto vecchi (Opzionale):** se un PC non aggiornato dovesse segnalare DLL `api-ms-win-crt-*` mancanti, installa il pacchetto ufficiale Microsoft [Visual C++ Redistributable x64 (`vc_redist.x64.exe`)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+- **Firewall e Router:** consenti `TheBoysDesk.exe` su reti Private e Pubbliche in Windows Firewall. Per connessioni fuori casa via Internet, attiva **UPnP** sul router o apri la porta **`21116/UDP`**.
+
 ## Crediti
 - Creata da **Marco Venditti** (`mark09venditti@gmail.com` • Discord: `cicciobaudo`)
 - Con l'aiuto di **LatiosJet**
